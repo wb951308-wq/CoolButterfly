@@ -156,6 +156,12 @@
     setCanvasSize();
     buildScene();
     lastBuildW = W; lastBuildH = H;
+    // 居中初始化蝴蝶，避免初始 W/H 为 0 时停在屏幕左上角（看不见）
+    if (!butterfly._init && W > 0 && H > 0) {
+      butterfly.x = butterfly.tx = W / 2;
+      butterfly.y = butterfly.ty = H / 2;
+      butterfly._init = true;
+    }
   }
 
   // 移动端浏览器地址栏收起/展开会频繁触发 resize 且只改变高度——
@@ -849,6 +855,10 @@
 
     resize();
     requestAnimationFrame(render);
+
+    // 手机端：蝴蝶常驻显示（手持设备难以稳定识别手势，且需要触摸引导），
+    // 否则在未检测到手之前用户看不到任何蝴蝶。
+    if (IS_MOBILE) butterfly.visible = true;
 
     if (!camOk) return;             // 无摄像头：仅触摸控制，跳过 MediaPipe
 
