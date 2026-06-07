@@ -1,0 +1,615 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>蝴蝶花园 · 蓝凤蝶手势互动</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,500;1,9..144,400&family=Noto+Sans+SC:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #0b1016; }
+
+  /* 摄像头实时画面：明亮自然 */
+  #cam {
+    position: fixed; inset: 0; width: 100%; height: 100%;
+    object-fit: cover; transform: scaleX(-1);
+    filter: contrast(1.03) saturate(1.08) brightness(1.0);
+    z-index: 0;
+  }
+  /* 通透的白昼色彩分级：上方天蓝、下方草绿，极淡 */
+  #grade {
+    position: fixed; inset: 0; z-index: 1; pointer-events: none;
+    background: linear-gradient(180deg, rgba(120,185,255,.12) 0%, rgba(255,250,235,.04) 48%, rgba(120,200,120,.14) 100%);
+    mix-blend-mode: soft-light;
+  }
+
+  #stage { position: fixed; inset: 0; z-index: 2; pointer-events: none; }
+
+  #brand {
+    position: fixed; left: 30px; top: 24px; z-index: 3;
+    font-family: 'Fraunces', serif; color: #fff; font-weight: 500; font-size: 26px;
+    letter-spacing: .5px; text-shadow: 0 2px 14px rgba(0,0,0,.35);
+  }
+  #brand small { display:block; font-family:'Noto Sans SC',sans-serif; font-weight:400; font-size:11px; letter-spacing:4px; opacity:.85; margin-top:1px; }
+
+  #hint {
+    position: fixed; left: 50%; bottom: 36px; transform: translateX(-50%);
+    z-index: 3; text-align: center; max-width: 92vw;
+    font-family: 'Noto Sans SC', sans-serif; color: #fff; font-size: 15px; line-height: 1.5;
+    padding: 13px 26px; border-radius: 999px;
+    background: rgba(255,255,255,.16);
+    border: 1px solid rgba(255,255,255,.4);
+    backdrop-filter: blur(10px);
+    box-shadow: 0 8px 30px rgba(0,0,0,.25);
+    text-shadow: 0 1px 6px rgba(0,0,0,.35);
+    transition: opacity .8s ease, transform .8s ease;
+  }
+  #hint.hide { opacity: 0; transform: translateX(-50%) translateY(12px); }
+  #hint b { color: #ffe27a; }
+  #hint .lang { display:block; margin-top:4px; font-family:'Fraunces',serif; font-style:italic; font-size:13px; opacity:.9; }
+
+  #err {
+    position: fixed; inset: 0; z-index: 5; display: none; place-items: center;
+    color: #fff; font-family: 'Noto Sans SC', sans-serif;
+    background: linear-gradient(160deg, #6ea8dd, #cfe6c0); text-align: center; padding: 30px; line-height: 1.8;
+  }
+  #err b { color: #fff6c0; }
+</style>
+</head>
+<body>
+  <video id="cam" autoplay playsinline muted></video>
+  <div id="grade"></div>
+  <canvas id="stage"></canvas>
+
+  <div id="brand">蝴蝶花园<small>BUTTERFLY GARDEN · SCHMETTERLINGSGARTEN</small></div>
+  <div id="hint">
+    正在启动摄像头与手势识别…
+    <span class="lang">Initializing camera &amp; hand tracking… · Kamera wird gestartet…</span>
+  </div>
+  <div id="err"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+<script>
+(function () {
+  "use strict";
+
+  const video  = document.getElementById('cam');
+  const canvas = document.getElementById('stage');
+  const ctx    = canvas.getContext('2d');
+  const hintEl = document.getElementById('hint');
+  const errEl  = document.getElementById('err');
+
+  let W = 0, H = 0, DPR = Math.min(window.devicePixelRatio || 1, 2);
+
+  function resize() {
+    W = window.innerWidth; H = window.innerHeight;
+    canvas.width = Math.floor(W * DPR); canvas.height = Math.floor(H * DPR);
+    canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    buildScene();
+  }
+  window.addEventListener('resize', resize);
+  function showError(msg){ errEl.style.display='grid'; errEl.innerHTML=msg; }
+  function rnd(i){ const s = Math.sin(i * 127.1 + 311.7) * 43758.5453; return s - Math.floor(s); }
+
+  /* ===== 花卉调色（参考郁金香花田） ===== */
+  const TULIPS = [
+    { dark:'#a81d14', base:'#e8392b', light:'#ff8266' },  // 红
+    { dark:'#cf9b00', base:'#ffd11a', light:'#fff292' },  // 黄
+    { dark:'#d8cdb8', base:'#fdfaf2', light:'#ffffff', heart:'#ffd34d' }, // 白
+    { dark:'#b83a72', base:'#ff7fb0', light:'#ffc6dd' },  // 粉
+    { dark:'#c95a12', base:'#ff8a3d', light:'#ffc285' }   // 橙
+  ];
+  const LAV = ['#7b54c8', '#9a6bd6', '#6f49bd'];
+
+  /* ===== 场景：草、花、漂浮花粉 ===== */
+  let grass = [], flowers = [], motes = [];
+  const GROUND_H = 360;
+
+  function buildScene() {
+    grass = [];
+    const gc = Math.max(240, Math.floor(W / 3.4));
+    for (let i = 0; i < gc; i++) {
+      const depth = rnd(i * 2.71), r = rnd(i * 1.13);
+      grass.push({
+        x: rnd(i * 3.37) * (W + 40) - 20,
+        h: 24 + depth * 120 + r * 44,
+        w: 1.4 + depth * 2.8,
+        bend: (rnd(i * 5.51) - 0.5) * 0.9,
+        sway: (0.4 + r) * (0.5 + depth),
+        phase: i * 0.55,
+        hue: 96 + (r - 0.5) * 30, depth
+      });
+    }
+    grass.sort((a, b) => a.depth - b.depth);
+
+    flowers = [];
+    const fc = Math.max(20, Math.floor(W / 40));
+    for (let i = 0; i < fc; i++) {
+      const depth = 0.45 + rnd(i * 7.9) * 0.55;
+      const isLav = rnd(i * 17.3) < 0.4;
+      flowers.push({
+        x: rnd(i * 4.19) * (W + 20) - 10,
+        kind: isLav ? 'lavender' : 'tulip',
+        stem: (isLav ? 70 : 50) + depth * 150 + rnd(i * 6.2) * 36,
+        size: isLav ? (7 + rnd(i*9.4)*4) * (0.7+depth*0.5)
+                    : (14 + rnd(i * 9.4) * 12) * (0.7 + depth * 0.6),
+        pal: TULIPS[Math.floor(rnd(i * 11.3) * TULIPS.length)],
+        lav: LAV[Math.floor(rnd(i*5.5)*LAV.length)],
+        sway: (0.4 + rnd(i * 3.1)) * (0.5 + depth),
+        phase: i * 0.83,
+        tilt: (rnd(i * 8.8) - 0.5) * 0.4,
+        bend: (rnd(i * 5.0) - 0.5) * 0.6,
+        depth, leafSide: i % 2 ? 1 : -1
+      });
+    }
+    flowers.sort((a, b) => a.depth - b.depth);
+
+    motes = [];
+    const mc = Math.max(20, Math.floor((W * H) / 60000));
+    for (let i = 0; i < mc; i++) {
+      motes.push({
+        x: rnd(i * 12.1) * W, y: rnd(i * 7.3) * H,
+        r: 3 + rnd(i * 3.9) * 9,
+        warm: rnd(i * 4.4) < 0.7,
+        a: 0.06 + rnd(i * 9.1) * 0.12,
+        drift: 0.1 + rnd(i * 2.4) * 0.5,
+        amp: 8 + rnd(i * 5.6) * 26,
+        phase: i * 1.7, tw: 0.4 + rnd(i * 8.3) * 0.6
+      });
+    }
+  }
+
+  // 漂浮花粉/阳光光点（柔和暖白）
+  function drawMotes(t) {
+    ctx.save(); ctx.globalCompositeOperation = 'lighter';
+    for (const o of motes) {
+      const ox = o.x + Math.sin(t * 0.0003 * (1 + o.drift) + o.phase) * o.amp;
+      const span = H + 60;
+      const oy = o.y + Math.cos(t * 0.00025 + o.phase) * o.amp * 0.6 - (t * 0.003 * o.drift % span);
+      const yy = ((oy % span) + span) % span - 30;
+      const tw = o.a * (0.5 + Math.abs(Math.sin(t * 0.001 * o.tw + o.phase)) * 0.5);
+      const g = ctx.createRadialGradient(ox, yy, 0, ox, yy, o.r);
+      const col = o.warm ? '255,244,200' : '210,235,255';
+      g.addColorStop(0, `rgba(${col},${tw})`);
+      g.addColorStop(1, `rgba(${col},0)`);
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(ox, yy, o.r, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  function drawGrass(g, t) {
+    const baseY = H + 6;
+    const sway = Math.sin(t * 0.0012 + g.phase) * g.sway * 14;
+    const topX = g.x + g.bend * g.h * 0.5 + sway;
+    const topY = baseY - g.h;
+    const midX = g.x + g.bend * g.h * 0.25 + sway * 0.4, midY = baseY - g.h * 0.5;
+    ctx.beginPath();
+    ctx.moveTo(g.x - g.w, baseY);
+    ctx.quadraticCurveTo(midX - g.w * 0.5, midY, topX, topY);
+    ctx.quadraticCurveTo(midX + g.w * 0.5, midY, g.x + g.w, baseY);
+    ctx.closePath();
+    const grd = ctx.createLinearGradient(g.x, baseY, topX, topY);
+    grd.addColorStop(0, `hsl(${g.hue}, 55%, ${20 + g.depth * 10}%)`);
+    grd.addColorStop(1, `hsl(${g.hue + 12}, 70%, ${46 + g.depth * 16}%)`);
+    ctx.fillStyle = grd; ctx.fill();
+  }
+
+  function leaf(lx, ly, len, side, depth) {
+    ctx.beginPath();
+    ctx.moveTo(lx, ly);
+    ctx.quadraticCurveTo(lx + side * len * 0.9, ly - len * 0.3, lx + side * len, ly - len * 1.5);
+    ctx.quadraticCurveTo(lx + side * len * 0.35, ly - len * 0.55, lx, ly);
+    const g = ctx.createLinearGradient(lx, ly, lx + side * len, ly - len * 1.4);
+    g.addColorStop(0, `hsl(108, 48%, ${22 + depth * 8}%)`);
+    g.addColorStop(1, `hsl(112, 62%, ${40 + depth * 12}%)`);
+    ctx.fillStyle = g; ctx.fill();
+  }
+
+  function tulipPetal(cx, h, w, tilt, c0, c1, c2) {
+    ctx.save(); ctx.translate(cx, 0); ctx.rotate(tilt);
+    const g = ctx.createLinearGradient(0, 0, 0, -h);
+    g.addColorStop(0, c0); g.addColorStop(0.55, c1); g.addColorStop(1, c2);
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.bezierCurveTo(-w, -h * 0.45, -w * 0.55, -h * 1.04, 0, -h);
+    ctx.bezierCurveTo(w * 0.55, -h * 1.04, w, -h * 0.45, 0, 0);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function drawTulip(R, f, near) {
+    const p = f.pal, h = R * 1.95, w = R * 0.62;
+    // 侧瓣（略暗）
+    tulipPetal(-w * 0.55, h * 0.9, w * 0.92, -0.17, p.dark, p.base, p.base);
+    tulipPetal(w * 0.55, h * 0.9, w * 0.92, 0.17, p.dark, p.base, p.base);
+    // 前中瓣（最高最亮）
+    tulipPetal(0, h, w, 0, p.dark, p.base, p.light);
+    // 中瓣竖向高光
+    ctx.strokeStyle = 'rgba(255,255,255,0.32)'; ctx.lineWidth = R * 0.12; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(0, -h * 0.2); ctx.lineTo(0, -h * 0.82); ctx.stroke();
+    // 白郁金香的暖黄花心
+    if (p.heart) {
+      ctx.fillStyle = p.heart;
+      ctx.beginPath(); ctx.ellipse(0, -h * 0.12, w * 0.3, h * 0.12, 0, 0, Math.PI * 2); ctx.fill();
+    }
+    if (near > 0) { ctx.save(); ctx.globalCompositeOperation='lighter';
+      const hl = ctx.createRadialGradient(0,-h*0.5,0,0,-h*0.5,R*2); hl.addColorStop(0,`rgba(255,245,210,${near*0.35})`); hl.addColorStop(1,'rgba(255,245,210,0)');
+      ctx.fillStyle=hl; ctx.beginPath(); ctx.arc(0,-h*0.5,R*2,0,Math.PI*2); ctx.fill(); ctx.restore(); }
+  }
+
+  function drawLavender(R, f, t, near) {
+    const sh = R * 2.6, n = 18;
+    for (let i = 0; i < n; i++) {
+      const fy = -sh * (i / n);
+      const off = Math.sin(i * 1.7 + f.phase + t * 0.001) * R * 0.18;
+      const fr = R * 0.2 * (1 - i / (n + 6));
+      ctx.fillStyle = (i % 2) ? f.lav : LAV[2];
+      ctx.beginPath(); ctx.ellipse(off, fy, fr, fr * 1.3, 0, 0, Math.PI * 2); ctx.fill();
+      if (i % 3 === 0) { ctx.fillStyle = 'rgba(255,255,255,0.25)';
+        ctx.beginPath(); ctx.ellipse(off - fr*0.3, fy - fr*0.3, fr*0.3, fr*0.4, 0,0,Math.PI*2); ctx.fill(); }
+    }
+    if (near > 0) { ctx.save(); ctx.globalCompositeOperation='lighter';
+      const hl=ctx.createRadialGradient(0,-sh*0.5,0,0,-sh*0.5,R*2.2); hl.addColorStop(0,`rgba(220,190,255,${near*0.4})`); hl.addColorStop(1,'rgba(220,190,255,0)');
+      ctx.fillStyle=hl; ctx.beginPath(); ctx.arc(0,-sh*0.5,R*2.2,0,Math.PI*2); ctx.fill(); ctx.restore(); }
+  }
+
+  function drawFlower(f, t) {
+    const baseY = H + 6;
+    const sway = Math.sin(t * 0.001 + f.phase) * f.sway * 14;
+    const topX = f.x + f.bend * f.stem * 0.4 + sway;
+    const topY = baseY - f.stem;
+    const midX = f.x + f.bend * f.stem * 0.22 + sway * 0.4, midY = baseY - f.stem * 0.55;
+
+    let near = 0;
+    if (butterfly.visible) {
+      const d = Math.hypot(topX - butterfly.x, topY - butterfly.y);
+      near = Math.max(0, 1 - d / 200);
+      if (near > 0.6 && Math.random() < near * 0.16) spawnParticles(topX, topY, 0, -0.4, 2, 48);
+    }
+
+    // 茎
+    ctx.beginPath();
+    ctx.moveTo(f.x, baseY); ctx.quadraticCurveTo(midX, midY, topX, topY);
+    ctx.lineWidth = (f.kind === 'lavender' ? 1.6 : 2.4) + f.depth * 1.6; ctx.lineCap = 'round';
+    ctx.strokeStyle = `hsl(110, 50%, ${26 + f.depth * 10}%)`; ctx.stroke();
+    // 叶
+    const ls = (10 + f.depth * 12);
+    leaf(f.x + (topX - f.x) * 0.4, baseY - f.stem * 0.4, ls, f.leafSide, f.depth);
+    if (f.kind === 'tulip') leaf(f.x + (topX - f.x) * 0.6, baseY - f.stem * 0.6, ls * 0.9, -f.leafSide, f.depth);
+
+    ctx.save();
+    ctx.translate(topX, topY);
+    ctx.rotate(f.tilt + Math.sin(t * 0.0009 + f.phase) * 0.08);
+    const R = f.size * (0.95 + near * 0.06);
+    if (f.kind === 'lavender') drawLavender(R, f, t, near); else drawTulip(R, f, near);
+    ctx.restore();
+  }
+
+  function drawScene(t) {
+    // 底部柔和草地雾气（明亮通透，不压暗人物）
+    const grad = ctx.createLinearGradient(0, H - GROUND_H, 0, H);
+    grad.addColorStop(0, 'rgba(150,200,150,0)');
+    grad.addColorStop(0.7, 'rgba(150,205,150,0.10)');
+    grad.addColorStop(1, 'rgba(120,185,120,0.28)');
+    ctx.fillStyle = grad; ctx.fillRect(0, H - GROUND_H, W, GROUND_H);
+    for (const g of grass) drawGrass(g, t);
+    for (const f of flowers) drawFlower(f, t);
+  }
+
+  /* ===== 粒子（柔和花粉/光尘/光丝） ===== */
+  const particles = [];
+  const KINDS = ['mote', 'spark', 'pollen'];
+  function spawnParticles(x, y, vx, vy, speed, hue) {
+    const n = Math.min(7, 1 + Math.floor(speed / 4));
+    for (let i = 0; i < n; i++) {
+      const kind = KINDS[(Math.random() * KINDS.length) | 0];
+      const ang = Math.atan2(vy, vx) + Math.PI + (Math.random() - 0.5) * 1.4;
+      const sp = Math.random() * 1.4 + 0.3;
+      particles.push({
+        x: x + (Math.random() - 0.5) * 12, y: y + (Math.random() - 0.5) * 12,
+        vx: Math.cos(ang) * sp - vx * 0.05, vy: Math.sin(ang) * sp - vy * 0.05,
+        life: 1, decay: 0.012 + Math.random() * 0.018,
+        size: kind === 'spark' ? 1 + Math.random() * 1.4 : 1.6 + Math.random() * 2.6,
+        hue: hue !== undefined ? (hue + (Math.random() - 0.5) * 40) : (45 + Math.random() * 20),
+        warm: Math.random() < 0.6, kind
+      });
+    }
+  }
+  function updateParticles() {
+    for (let i = particles.length - 1; i >= 0; i--) {
+      const p = particles[i];
+      p.x += p.vx; p.y += p.vy; p.vy += p.kind === 'pollen' ? -0.006 : 0.01; p.vx *= 0.985;
+      p.life -= p.decay; if (p.life <= 0) particles.splice(i, 1);
+    }
+    if (particles.length > 900) particles.splice(0, particles.length - 900);
+  }
+  function drawParticles() {
+    ctx.save(); ctx.globalCompositeOperation = 'lighter';
+    for (const p of particles) {
+      const a = Math.max(0, p.life);
+      if (p.kind === 'spark') {
+        const len = 5 + Math.hypot(p.vx, p.vy) * 4, m = Math.hypot(p.vx, p.vy) || 1;
+        ctx.globalAlpha = a; ctx.strokeStyle = `hsla(${p.hue},100%,85%,${a})`;
+        ctx.lineWidth = p.size; ctx.lineCap = 'round';
+        ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(p.x - p.vx/m*len, p.y - p.vy/m*len); ctx.stroke(); ctx.globalAlpha = 1;
+      } else {
+        const r = p.size * 3.2;
+        const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, r);
+        const col = p.warm ? '255,240,180' : '200,230,255';
+        g.addColorStop(0, `rgba(${col},${a})`); g.addColorStop(0.4, `hsla(${p.hue},100%,75%,${a*0.5})`); g.addColorStop(1, `rgba(${col},0)`);
+        ctx.fillStyle = g; ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI * 2); ctx.fill();
+      }
+    }
+    ctx.restore();
+  }
+
+  /* ===== 蝴蝶：蓝凤蝶（燕尾蝶） ===== */
+  const butterfly = {
+    x: W/2, y: H/2, tx: W/2, ty: H/2, vx:0, vy:0, angle:0, wing:0,
+    hasTarget:false, visible:false, trail:[]
+  };
+  const rings = []; let ringCD = 0;
+  function updateRings() {
+    if (ringCD > 0) ringCD--;
+    for (let i = rings.length - 1; i >= 0; i--) { const r = rings[i]; r.r += 5; r.life -= 0.03; if (r.life <= 0) rings.splice(i, 1); }
+  }
+  function drawRings() {
+    ctx.save(); ctx.globalCompositeOperation = 'lighter';
+    for (const r of rings) { ctx.strokeStyle = `rgba(180,225,255,${r.life*0.5})`; ctx.lineWidth = 2.5*r.life+0.5; ctx.beginPath(); ctx.arc(r.x, r.y, r.r, 0, Math.PI*2); ctx.stroke(); }
+    ctx.restore();
+  }
+
+  function updateButterfly(t) {
+    const ease = butterfly.hasTarget ? 0.14 : 0.04;
+    const dx = butterfly.tx - butterfly.x, dy = butterfly.ty - butterfly.y;
+    butterfly.vx = dx * ease; butterfly.vy = dy * ease;
+    const drift = butterfly.hasTarget ? 1 : 6;
+    butterfly.x += butterfly.vx + Math.sin(t * 0.003) * 0.3 * drift;
+    butterfly.y += butterfly.vy + Math.cos(t * 0.0024) * 0.4 * drift;
+    const speed = Math.hypot(butterfly.vx, butterfly.vy);
+    if (speed > 0.5) {
+      const ta = Math.atan2(butterfly.vy, butterfly.vx);
+      let da = ta - butterfly.angle;
+      while (da > Math.PI) da -= Math.PI * 2; while (da < -Math.PI) da += Math.PI * 2;
+      butterfly.angle += da * 0.18;
+    }
+    butterfly.wing += 0.18 + Math.min(0.34, speed * 0.02);
+    if (butterfly.visible) { butterfly.trail.push({ x: butterfly.x, y: butterfly.y }); if (butterfly.trail.length > 26) butterfly.trail.shift(); }
+    if (butterfly.visible && speed > 0.9) spawnParticles(butterfly.x, butterfly.y, butterfly.vx, butterfly.vy, speed);
+    if (butterfly.visible && speed > 7 && ringCD <= 0) { rings.push({ x: butterfly.x, y: butterfly.y, r: 8, life: 1 }); ringCD = 6; }
+    return speed;
+  }
+  function drawTrail() {
+    const tr = butterfly.trail; if (tr.length < 3) return;
+    ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    const layers = [{ w: 20, a: 0.05, l: 70 }, { w: 9, a: 0.10, l: 80 }, { w: 3.5, a: 0.22, l: 92 }];
+    for (const L of layers) for (let i = 1; i < tr.length; i++) {
+      const f = i / tr.length;
+      ctx.strokeStyle = `hsla(210, 100%, ${L.l}%, ${L.a * f})`; ctx.lineWidth = L.w * f;
+      ctx.beginPath(); ctx.moveTo(tr[i-1].x, tr[i-1].y); ctx.lineTo(tr[i].x, tr[i].y); ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  const BF_SCALE = 1.7;
+
+  // 单翅：前翅 + 带燕尾的后翅，蓝凤蝶配色
+  function drawWing(scaleX, fold, t) {
+    ctx.save();
+    ctx.scale(scaleX, 1);
+    const open = 1 - fold;
+    ctx.transform(Math.max(0.12, open), 0, 0, 1, 0, 0);
+
+    // 前翅
+    const fore = new Path2D();
+    fore.moveTo(2, -4);
+    fore.bezierCurveTo(10, -42, 50, -60, 76, -46);
+    fore.bezierCurveTo(83, -39, 77, -18, 56, -9);
+    fore.bezierCurveTo(38, -2, 14, 0, 2, -4);
+    fore.closePath();
+
+    // 后翅 + 燕尾
+    const hind = new Path2D();
+    hind.moveTo(2, 2);
+    hind.bezierCurveTo(18, 12, 46, 18, 54, 36);
+    hind.bezierCurveTo(60, 50, 50, 56, 42, 52);
+    hind.bezierCurveTo(41, 62, 34, 76, 29, 71);    // 燕尾
+    hind.bezierCurveTo(31, 58, 24, 52, 18, 50);
+    hind.bezierCurveTo(9, 46, 3, 26, 2, 2);
+    hind.closePath();
+
+    // 黑色底
+    ctx.fillStyle = '#100f16'; ctx.fill(fore); ctx.fill(hind);
+
+    // 结构蓝斑块（中部辉蓝，向翅缘渐隐为黑）
+    function blue(path, cx, cy, rr) {
+      ctx.save(); ctx.clip(path);
+      const g = ctx.createRadialGradient(cx, cy, 2, cx, cy, rr);
+      g.addColorStop(0, '#2f7bff');
+      g.addColorStop(0.45, '#3aa6ff');
+      g.addColorStop(0.75, 'rgba(40,110,220,0.55)');
+      g.addColorStop(1, 'rgba(10,20,60,0)');
+      ctx.fillStyle = g; ctx.fillRect(-10, -80, 110, 160);
+      ctx.restore();
+    }
+    blue(fore, 30, -28, 42);
+    blue(hind, 28, 26, 40);
+
+    // 结构色游移微光
+    const sh = (Math.sin(t * 0.001) * 0.5 + 0.5);
+    for (const path of [fore, hind]) {
+      ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.clip(path);
+      const ir = ctx.createLinearGradient(-10, -60, 80, 24);
+      ir.addColorStop(Math.max(0, sh - 0.34), 'rgba(140,210,255,0)');
+      ir.addColorStop(sh, 'rgba(190,235,255,0.32)');
+      ir.addColorStop(Math.min(1, sh + 0.34), 'rgba(150,180,255,0)');
+      ctx.fillStyle = ir; ctx.fillRect(-12, -76, 110, 150); ctx.restore();
+    }
+
+    // 黑色翅脉
+    function veins(path, fan) {
+      ctx.save(); ctx.clip(path); ctx.strokeStyle = 'rgba(10,10,18,0.6)'; ctx.lineCap = 'round';
+      for (const v of fan) { ctx.lineWidth = v.w || 1; ctx.beginPath(); ctx.moveTo(3, 0); ctx.lineTo(v.x, v.y); ctx.stroke(); }
+      ctx.restore();
+    }
+    veins(fore, [{x:64,y:-44,w:1.3},{x:72,y:-30},{x:58,y:-12},{x:46,y:-50},{x:28,y:-52}]);
+    veins(hind, [{x:50,y:34,w:1.3},{x:42,y:48},{x:28,y:50},{x:14,y:30}]);
+
+    // 后翅缘——黄色月牙斑
+    ctx.fillStyle = '#ffc524';
+    for (const [sx, sy] of [[52,34],[48,44],[40,50],[31,51],[22,48]]) {
+      ctx.beginPath(); ctx.ellipse(sx, sy, 3.2, 2.2, 0.5, 0, Math.PI * 2); ctx.fill();
+    }
+    // 近尾橙红斑
+    ctx.fillStyle = '#ff5a1e';
+    ctx.beginPath(); ctx.ellipse(20, 44, 3.4, 2.6, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#1e63ff';
+    ctx.beginPath(); ctx.arc(20, 44, 1.2, 0, Math.PI * 2); ctx.fill();
+
+    // 前翅缘——淡蓝白点
+    ctx.fillStyle = 'rgba(190,225,255,0.9)';
+    for (const [dx, dy] of [[70,-42],[66,-28],[58,-14],[48,-50]]) {
+      ctx.beginPath(); ctx.arc(dx, dy, 1.5, 0, Math.PI * 2); ctx.fill();
+    }
+
+    // 翅缘细黑边
+    ctx.lineJoin = 'round'; ctx.strokeStyle = '#0c0b12'; ctx.lineWidth = 2;
+    ctx.stroke(fore); ctx.stroke(hind);
+
+    ctx.restore();
+  }
+
+  function drawButterfly(t) {
+    if (!butterfly.visible) return;
+    const fold = (1 - Math.cos(butterfly.wing)) * 0.5 * 0.9;
+    const lift = Math.abs(Math.sin(butterfly.wing)) * 3;
+    ctx.save();
+    ctx.translate(butterfly.x, butterfly.y - lift);
+    ctx.rotate(butterfly.angle + Math.PI / 2);
+    ctx.scale(BF_SCALE, BF_SCALE);
+
+    // 柔和阳光光晕
+    ctx.save(); ctx.globalCompositeOperation = 'lighter';
+    const halo = ctx.createRadialGradient(0, 0, 0, 0, 0, 64);
+    halo.addColorStop(0, 'rgba(120,180,255,0.18)'); halo.addColorStop(1, 'rgba(120,180,255,0)');
+    ctx.fillStyle = halo; ctx.beginPath(); ctx.arc(0, 0, 64, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+
+    drawWing(1, fold, t); drawWing(-1, fold, t);
+
+    // 棕色绒毛身体（参考图）
+    const bg = ctx.createLinearGradient(-4, 0, 4, 0);
+    bg.addColorStop(0, '#3a2613'); bg.addColorStop(0.5, '#9a7240'); bg.addColorStop(1, '#3a2613');
+    ctx.fillStyle = bg;
+    ctx.beginPath(); ctx.ellipse(0, 4, 4, 21, 0, 0, Math.PI * 2); ctx.fill();
+    // 胸部更蓬松
+    const tg = ctx.createLinearGradient(-5, -12, 5, 0);
+    tg.addColorStop(0, '#4a3018'); tg.addColorStop(0.5, '#b08a52'); tg.addColorStop(1, '#4a3018');
+    ctx.fillStyle = tg; ctx.beginPath(); ctx.ellipse(0, -9, 5, 11, 0, 0, Math.PI * 2); ctx.fill();
+    // 绒毛
+    ctx.strokeStyle = 'rgba(210,180,130,0.5)'; ctx.lineWidth = 0.8; ctx.lineCap = 'round';
+    for (let a = 0; a < 14; a++) {
+      const an = (a / 14) * Math.PI * 2, r0 = 4, r1 = 7 + Math.abs(Math.sin(a)) * 1.6;
+      ctx.beginPath(); ctx.moveTo(Math.cos(an) * r0, -9 + Math.sin(an) * r0 * 1.6); ctx.lineTo(Math.cos(an) * r1, -9 + Math.sin(an) * r1 * 1.6); ctx.stroke();
+    }
+    // 腹部分节
+    ctx.strokeStyle = 'rgba(40,26,12,0.5)'; ctx.lineWidth = 0.7;
+    for (let s = -2; s <= 22; s += 4) { ctx.beginPath(); ctx.moveTo(-3.4, s); ctx.lineTo(3.4, s); ctx.stroke(); }
+    // 头
+    ctx.beginPath(); ctx.arc(0, -20, 3.6, 0, Math.PI * 2); ctx.fillStyle = '#2a1c0e'; ctx.fill();
+    // 触角（黑，棒状末端）
+    ctx.strokeStyle = '#1a120a'; ctx.lineWidth = 1.3; ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(-1, -22); ctx.quadraticCurveTo(-8, -34, -12, -40);
+    ctx.moveTo(1, -22); ctx.quadraticCurveTo(8, -34, 12, -40);
+    ctx.stroke();
+    ctx.fillStyle = '#1a120a';
+    for (const ax of [-12, 12]) { ctx.beginPath(); ctx.ellipse(ax, -40, 1.7, 2.4, 0, 0, Math.PI * 2); ctx.fill(); }
+
+    ctx.restore();
+  }
+
+  function drawVignette() {
+    const g = ctx.createRadialGradient(W/2, H*0.5, Math.min(W,H)*0.42, W/2, H/2, Math.max(W,H)*0.85);
+    g.addColorStop(0, 'rgba(0,0,0,0)'); g.addColorStop(1, 'rgba(20,30,20,0.22)');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  }
+
+  // 柔和泛光（梦幻阳光）
+  let bloomCv, bloomCx;
+  function applyBloom() {
+    if (!bloomCv) { bloomCv = document.createElement('canvas'); bloomCx = bloomCv.getContext('2d'); }
+    const bw = Math.max(1, Math.floor(canvas.width / 2)), bh = Math.max(1, Math.floor(canvas.height / 2));
+    if (bloomCv.width !== bw || bloomCv.height !== bh) { bloomCv.width = bw; bloomCv.height = bh; }
+    bloomCx.clearRect(0, 0, bw, bh); bloomCx.drawImage(canvas, 0, 0, bw, bh);
+    ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.filter = 'blur(7px) brightness(1.15)'; ctx.globalAlpha = 0.55; ctx.drawImage(bloomCv, 0, 0, canvas.width, canvas.height);
+    ctx.filter = 'blur(16px)'; ctx.globalAlpha = 0.4; ctx.drawImage(bloomCv, 0, 0, canvas.width, canvas.height);
+    ctx.filter = 'none'; ctx.globalAlpha = 1; ctx.restore();
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  }
+
+  /* ===== 渲染循环 ===== */
+  function render(t) {
+    ctx.clearRect(0, 0, W, H);
+    drawMotes(t);
+    drawScene(t);
+    updateButterfly(t);
+    updateRings();
+    drawTrail();
+    drawRings();
+    updateParticles();
+    drawParticles();
+    drawButterfly(t);
+    applyBloom();
+    drawVignette();
+    requestAnimationFrame(render);
+  }
+
+  /* ===== MediaPipe ===== */
+  function onResults(results) {
+    if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+      const tip = results.multiHandLandmarks[0][8];
+      butterfly.tx = (1 - tip.x) * W; butterfly.ty = tip.y * H;
+      butterfly.hasTarget = true; butterfly.visible = true; hintEl.classList.add('hide');
+    } else butterfly.hasTarget = false;
+  }
+
+  async function start() {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width:{ideal:1280}, height:{ideal:720} }, audio: false });
+      video.srcObject = stream; await video.play();
+    } catch (e) {
+      showError('无法访问摄像头：' + (e && e.message ? e.message : e) +
+        '<br><br>请允许摄像头权限，并通过 <b>localhost</b> 或直接双击打开本文件。' +
+        '<br><span style="opacity:.8">Camera access failed · Kamerazugriff fehlgeschlagen</span>');
+      return;
+    }
+    resize(); requestAnimationFrame(render);
+    if (typeof Hands === 'undefined') {
+      hintEl.innerHTML = '⚠️ 未能加载手势模型（可能无网络），蝴蝶将自由飞舞。<span class="lang">Gesture model not loaded — the butterfly flies freely.</span>';
+      butterfly.visible = true; return;
+    }
+    const hands = new Hands({ locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}` });
+    hands.setOptions({ maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.6, minTrackingConfidence: 0.6 });
+    hands.onResults(onResults);
+    let busy = false;
+    async function detectLoop() {
+      if (!busy && video.readyState >= 2) { busy = true; try { await hands.send({ image: video }); } catch (err) {} busy = false; }
+      requestAnimationFrame(detectLoop);
+    }
+    detectLoop();
+    hintEl.innerHTML = '移动<b>食指</b>，蓝凤蝶会停在你指尖飞舞<span class="lang">Move your index finger — the swallowtail follows · Folge dem Zeigefinger</span>';
+    setTimeout(() => hintEl.classList.add('hide'), 8500);
+  }
+
+  resize(); start();
+})();
+</script>
+</body>
+</html>
