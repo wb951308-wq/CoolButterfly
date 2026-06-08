@@ -575,7 +575,7 @@
     ctx.restore();
   }
 
-  const BF_SCALE = 1.75;
+  const BF_SCALE = IS_MOBILE ? 1.3 : 1.75;   // 手机屏幕小，蝴蝶相应缩小
 
   // 单翅：前翅 + 后翅，蓝闪蝶结构色
   function drawWing(scaleX, fold, t) {
@@ -833,8 +833,39 @@
     }
   }
 
-  async function start() {
-    let camOk = true;
+  // 渲染与蝴蝶先跑起来，完全不依赖摄像头——
+  // 这样 Android 上无论摄像头是在等待授权、被拒、还是处于非 HTTPS 环境（无 navigator.mediaDevices），
+  // 都能立刻看到蝴蝶；摄像头/手势只是“锦上添花”的增强层。
+  function start() {
+    resize();
+    requestAnimationFrame(render);
+
+    // 手机端：蝴蝶常驻显示（手持设备难以稳定识别手势，且主要靠触摸引导）
+    if (IS_MOBILE) butterfly.visible = true;
+
+    hintEl.innerHTML = IS_MOBILE
+      ? '<b>手指拖动</b>屏幕引导蓝闪蝶飞行（也可对准镜头移动食指）' +
+        '<span class="lang">Finger über den Bildschirm ziehen — oder Zeigefinger vor der Kamera.</span>' +
+        '<span class="lang">Drag on screen to guide the morpho — or move your index finger at the camera.</span>'
+      : '正在启动摄像头与手势识别…' +
+        '<span class="lang">Kamera &amp; Handerkennung werden gestartet…</span>' +
+        '<span class="lang">Initializing camera &amp; hand tracking…</span>';
+
+    initCamera();   // 异步增强，不阻塞渲染
+  }
+
+  async function initCamera() {
+    // 非安全上下文（手机上以 http/IP 访问）下 navigator.mediaDevices 为 undefined——
+    // 直接走触摸回退，不抛错卡住。
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      hintEl.innerHTML =
+        '摄像头不可用（需 <b>HTTPS</b> 或 localhost），<b>用手指拖动屏幕</b>引导蝴蝶。' +
+        '<span class="lang">Kamera braucht HTTPS — mit dem Finger über den Bildschirm ziehen.</span>' +
+        '<span class="lang">Camera needs HTTPS — drag your finger across the screen.</span>';
+      butterfly.visible = true;
+      return;
+    }
+
     try {
       // 手机端用较低分辨率，减轻解码与手势识别负担
       const v = IS_MOBILE
@@ -843,30 +874,20 @@
       const stream = await navigator.mediaDevices.getUserMedia({ video: v, audio: false });
       video.srcObject = stream; await video.play();
     } catch (e) {
-      // 摄像头不可用（权限被拒 / 非 HTTPS / 被占用）时不再卡死，
-      // 改为可用触摸引导的回退体验。
-      camOk = false;
+      // 权限被拒 / 被占用：保留触摸引导
       hintEl.innerHTML =
         '摄像头不可用，<b>用手指在屏幕上拖动</b>引导蓝闪蝶。' +
         '<span class="lang">Kamera nicht verfügbar — mit dem Finger über den Bildschirm ziehen.</span>' +
         '<span class="lang">Camera unavailable — drag your finger across the screen to guide the morpho.</span>';
       butterfly.visible = true;
+      return;
     }
-
-    resize();
-    requestAnimationFrame(render);
-
-    // 手机端：蝴蝶常驻显示（手持设备难以稳定识别手势，且需要触摸引导），
-    // 否则在未检测到手之前用户看不到任何蝴蝶。
-    if (IS_MOBILE) butterfly.visible = true;
-
-    if (!camOk) return;             // 无摄像头：仅触摸控制，跳过 MediaPipe
 
     if (typeof Hands === 'undefined') {
       hintEl.innerHTML =
-        '⚠️ 未能加载 MediaPipe（可能无网络），蝴蝶将自由漂浮。' +
-        '<span class="lang">MediaPipe nicht geladen — Schmetterling schwebt frei.</span>' +
-        '<span class="lang">MediaPipe failed to load — butterfly floats freely.</span>';
+        '⚠️ 未能加载 MediaPipe（可能无网络），用手指拖动屏幕引导蝴蝶。' +
+        '<span class="lang">MediaPipe nicht geladen — mit dem Finger ziehen.</span>' +
+        '<span class="lang">MediaPipe failed to load — drag your finger to guide.</span>';
       butterfly.visible = true;
       return;
     }
